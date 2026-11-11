@@ -6,8 +6,13 @@ und 3:00 Uhr (Morgen-Check für heute), jeweils deutsche Winterzeit (CET, UTC+1)
 
 Prüft die 3 AGB-Kriterien für zwei Standorte (Rellingen, Ellerbek), je 10 km Umkreis:
   a) Neuschnee / Schneedecke >= 1 cm
-  b) Glätte (Niederschlag + Temp <= +1°C seit 20 Uhr Vortag)
+  b) Glätte (Niederschlag/Nässe seit 20 Uhr Vortag, Temp irgendwann danach <= +1°C –
+     nicht zwingend zeitgleich, deckt "überfrierende Nässe" ab)
   c) Offizielle DWD-Warnung (Schnee/Glätte/Glatteis) für den Standort
+
+Zusätzlich eine Risikostufe 1-5 (siehe risk_level()), inkl. einer Vorwarnstufe für
+Grenzfälle (≤3°C Luft statt ≤1°C), weil die Straßenoberfläche in klaren, windstillen
+Nächten oft kälter ist als die gemessene Lufttemperatur.
 
 Datenquelle: Bright Sky API (offene Schnittstelle auf DWD-Daten, kein Key nötig)
 Versand: Gmail SMTP mit App-Passwort (Umgebungsvariablen GMAIL_USER / GMAIL_APP_PASSWORD)
@@ -32,6 +37,19 @@ CET = timezone(timedelta(hours=1))
 
 # Ende des Prüffensters am Zieltag (Uhrzeit, bis wann "morgens" zählt)
 WINDOW_END_HOUR = 7
+
+# Sicherheitsmarge für die Vorwarnstufe (Grenzfall), zusätzlich zum harten
+# AGB-Kriterium b) bei 1°C. Luft kann 2-4°C wärmer sein als die Fläche selbst.
+GRENZFALL_TEMP = 3
+
+# Für Risikostufe 5: ab wie viel mm Niederschlag-als-Schnee (≈ cm Neuschnee)
+STUFE5_SCHNEE_MM = 5
+
+# Link, über den du den Check jederzeit manuell mit frischen Daten neu anstoßen kannst
+# (GitHub-Login im Browser nötig). Anpassen, falls Benutzername/Repo-Name abweichen.
+RERUN_URL = "https://github.com/22072204/winterdienst-check/actions/workflows/winterdienst.yml"
+
+SEVERITY_RANK = {"minor": 1, "moderate": 2, "severe": 3, "extreme": 4}
 
 GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
@@ -87,17 +105,32 @@ def evaluate_location(loc, window_start_dt, window_end_dt):
             snow_precip_sum += h.get("precipitation") or 0
     kriterium_a = snow_precip_sum >= 1
 
-    # --- Kriterium b) Glätte ---
+    # --- Kriterium b) Glätte (inkl. "überfrierende Nässe") ---
+    # Nicht nur zeitgleich prüfen: Niederschlag kann z.B. bei +4°C tagsüber fallen,
+    # die Fläche bleibt nass, und erst Stunden später sinkt die Temperatur auf ≤1°C.
+    # Das AGB-Kriterium ("Nässe ... bei Lufttemperaturen von +1°C oder darunter
+    # vorlag") deckt genau diesen Fall ab -> wir prüfen sequenziell, nicht nur stundengleich.
+    precip_times = [
+        parse_dt(h["timestamp"]) for h in weather if (h.get("precipitation") or 0) > 0.05
+    ]
+    first_precip_time = min(precip_times) if precip_times else None
+
     glaette_stunde = None
-    for h in weather:
-        if (
-            h.get("temperature") is not None
-            and h["temperature"] <= 1
-            and (h.get("precipitation") or 0) > 0.05
-        ):
-            glaette_stunde = h["timestamp"]
-            break
+    grenzfall_stunde = None
+    if first_precip_time:
+        for h in weather:
+            if h.get("temperature") is None:
+                continue
+            t = parse_dt(h["timestamp"])
+            if t < first_precip_time:
+                continue
+            if h["temperature"] <= 1 and glaette_stunde is None:
+                glaette_stunde = h["timestamp"]
+            if h["temperature"] <= GRENZFALL_TEMP and grenzfall_stunde is None:
+                grenzfall_stunde = h["timestamp"]
     kriterium_b = glaette_stunde is not None
+    # Grenzfall nur relevant, wenn das harte Kriterium (noch) nicht erfüllt ist
+    grenzfall = grenzfall_stunde is not None and not kriterium_b
 
     # --- Kriterium c) Offizielle DWD-Warnung ---
     relevant_alerts = []
@@ -118,17 +151,36 @@ def evaluate_location(loc, window_start_dt, window_end_dt):
     min_temp = min(temps) if temps else None
     precip_sum = sum(h.get("precipitation") or 0 for h in weather)
 
+    einsatz_noetig = kriterium_a or kriterium_b or kriterium_c
+
+    # --- Risikostufe 1-5 ---
+    max_severity = max((SEVERITY_RANK.get(a.get("severity"), 0) for a in relevant_alerts), default=0)
+    if snow_precip_sum >= STUFE5_SCHNEE_MM or max_severity >= 3:
+        stufe = 5
+    elif einsatz_noetig:
+        stufe = 4
+    elif grenzfall:
+        stufe = 3
+    elif min_temp is not None and min_temp <= GRENZFALL_TEMP:
+        stufe = 2
+    else:
+        stufe = 1
+
     return {
         "loc": loc,
         "kriterium_a": kriterium_a,
         "kriterium_b": kriterium_b,
         "kriterium_c": kriterium_c,
+        "grenzfall": grenzfall,
+        "grenzfall_stunde": grenzfall_stunde,
         "snow_precip_sum": snow_precip_sum,
         "glaette_stunde": glaette_stunde,
+        "first_precip_time": first_precip_time,
         "relevant_alerts": relevant_alerts,
         "min_temp": min_temp,
         "precip_sum": precip_sum,
-        "einsatz_noetig": kriterium_a or kriterium_b or kriterium_c,
+        "einsatz_noetig": einsatz_noetig,
+        "stufe": stufe,
     }
 
 
@@ -147,19 +199,29 @@ def run_check(mode: str):
 
     results = [evaluate_location(loc, window_start_dt, window_end_dt) for loc in LOCATIONS]
     einsatz_noetig = any(r["einsatz_noetig"] for r in results)
+    gesamt_stufe = max(r["stufe"] for r in results)
 
     tag_label = "morgen" if mode == "abend" else "heute"
     datum_label = target_date.strftime("%d.%m.%Y")
 
-    subject = (
-        f"❄️ Winterdienst {tag_label} ({datum_label}): EINSATZ NÖTIG"
-        if einsatz_noetig
-        else f"✅ Winterdienst {tag_label} ({datum_label}): kein Einsatz nötig"
-    )
+    STUFE_LABEL = {
+        1: "🟢 Stufe 1/5 – kein Risiko",
+        2: "🟡 Stufe 2/5 – leicht kühl, kein akutes Risiko",
+        3: "🟠 Stufe 3/5 – GRENZFALL, bitte im Auge behalten",
+        4: "🔴 Stufe 4/5 – EINSATZ NÖTIG",
+        5: "⚫❄️ Stufe 5/5 – EINSATZ DRINGEND (deutlicher Schnee / schwere Warnung)",
+    }
 
-    lines = []
+    subject = f"Winterdienst {tag_label} ({datum_label}): {STUFE_LABEL[gesamt_stufe]}"
+
+    lines = [f"Gesamt-Risikostufe: {STUFE_LABEL[gesamt_stufe]}", ""]
     if einsatz_noetig:
         lines.append(f"Laut Prognose/Warnung musst du {tag_label} ({datum_label}) voraussichtlich ausrücken.")
+    elif gesamt_stufe == 3:
+        lines.append(
+            f"Formal ist noch keines deiner AGB-Kriterien erfüllt, aber {tag_label} ({datum_label}) ist ein "
+            "Grenzfall (kühl + Nässe) – die Straße kann kälter sein als die Luft. Lieber kurz selbst checken."
+        )
     else:
         lines.append(
             f"Laut Prognose/Warnung ist für {tag_label} ({datum_label}) an beiden Standorten aktuell kein Einsatz nötig."
@@ -167,30 +229,39 @@ def run_check(mode: str):
     lines.append("")
 
     for r in results:
-        lines.append(f"── {r['loc']['name']} ──")
-        if not r["einsatz_noetig"]:
-            lines.append("Keines der 3 AGB-Kriterien erfüllt.")
-        else:
-            if r["kriterium_a"]:
-                lines.append(
-                    f"• Neuschnee/Schneedecke: ca. {r['snow_precip_sum']:.1f} mm Niederschlag als Schnee bei ≤1°C "
-                    f"(Faustregel ≈ cm Schnee)"
-                )
-            if r["kriterium_b"]:
-                lines.append(f"• Glätte-Risiko: Niederschlag bei ≤1°C, erste Stunde ab {r['glaette_stunde']}")
-            if r["kriterium_c"]:
-                for a in r["relevant_alerts"]:
-                    bis = f", bis {a.get('expires')}" if a.get("expires") else ""
-                    lines.append(f"• DWD-Warnung: {a.get('event_de')} – {a.get('headline_de')} (ab {a.get('onset')}{bis})")
+        lines.append(f"── {r['loc']['name']} – {STUFE_LABEL[r['stufe']]} ──")
+        if r["kriterium_a"]:
+            lines.append(
+                f"• Neuschnee/Schneedecke: ca. {r['snow_precip_sum']:.1f} mm Niederschlag als Schnee bei ≤1°C "
+                f"(Faustregel ≈ cm Schnee)"
+            )
+        if r["kriterium_b"]:
+            lines.append(
+                f"• Glätte-Risiko (AGB, ≤1°C): Nässe seit {r['first_precip_time']}, "
+                f"Temperatur ≤1°C ab {r['glaette_stunde']}"
+            )
+        if r["kriterium_c"]:
+            for a in r["relevant_alerts"]:
+                bis = f", bis {a.get('expires')}" if a.get("expires") else ""
+                lines.append(f"• DWD-Warnung: {a.get('event_de')} – {a.get('headline_de')} (ab {a.get('onset')}{bis})")
+        if r["grenzfall"]:
+            lines.append(
+                f"• Grenzfall-Vorwarnung: Nässe seit {r['first_precip_time']}, Temperatur ≤{GRENZFALL_TEMP}°C "
+                f"ab {r['grenzfall_stunde']} (AGB-Schwelle 1°C noch nicht erreicht)"
+            )
+        if r["stufe"] == 1:
+            lines.append("Keines der Kriterien bzw. Vorwarnstufen erfüllt.")
         min_temp_str = f"{r['min_temp']}°C" if r["min_temp"] is not None else "k.A."
         lines.append(f"Min. Temp: {min_temp_str}, Niederschlagssumme: {r['precip_sum']:.1f} mm")
         lines.append("")
 
     lines.append(f"Zeitfenster: {iso_cet(window_start_dt)} – {iso_cet(window_end_dt)}")
     lines.append("")
+    lines.append(f"Check manuell mit frischen Daten neu laufen lassen: {RERUN_URL}")
+    lines.append("")
     lines.append(
         "⚠️ Automatische Einschätzung auf Basis der DWD-Vorhersage (Bright Sky API), geprüft für die "
-        "beiden Standorte Rellingen und Ellerbek im 10-km-Umkreis. Bei Grenzfällen oder kurz vor knapp: "
+        "beiden Standorte Rellingen und Ellerbek im 10-km-Umkreis. Bei Stufe 2-3 oder kurz vor knapp: "
         "bitte kurz selbst aus dem Fenster schauen bzw. die DWD-Warnlage prüfen, bevor du dich "
         "verbindlich festlegst."
     )
