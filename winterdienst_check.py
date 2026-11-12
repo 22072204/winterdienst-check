@@ -45,7 +45,7 @@ MORGEN_MAIL_UHRZEIT = "4:55"
 
 # Sicherheitsmarge für die Vorwarnstufe (Grenzfall), zusätzlich zum harten
 # AGB-Kriterium b) bei 1°C. Luft kann 2-4°C wärmer sein als die Fläche selbst.
-GRENZFALL_TEMP = 4
+GRENZFALL_TEMP = 3
 
 # Reif-Regel (Glätte ohne Niederschlag): klare, windarme, feuchte Nacht bei wenig Plusgraden.
 # Dann kühlt die Fläche unter die Lufttemperatur ab, Reif/überfrierende Feuchtigkeit ist möglich.
@@ -230,8 +230,8 @@ def evaluate_location(loc, window_start_dt, window_end_dt):
     #  6: extremes Unwetter (DWD) oder sehr viel Schnee (>= STUFE6_SCHNEE_MM)
     #  5: Unwetter (DWD) oder deutlicher Schnee (>= STUFE5_SCHNEE_MM)
     #  4: mindestens ein AGB-Kriterium erfüllt -> Einsatz nötig
-    #  3: Grenzfall (Nässe + ≤4°C) oder Reif-Risiko (klar, windarm, feucht, ≤3°C)
-    #  2: leicht kühl (≤4°C irgendwann im Fenster)
+    #  3: Grenzfall (Nässe + ≤3°C) oder Reif-Risiko (klar, windarm, feucht, ≤3°C)
+    #  2: leicht kühl (≤3°C irgendwann im Fenster)
     #  1: kein Risiko
     max_severity = max((SEVERITY_RANK.get(a.get("severity"), 0) for a in relevant_alerts), default=0)
     if snow_precip_sum >= STUFE6_SCHNEE_MM or max_severity >= 4:
