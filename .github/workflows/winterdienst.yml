@@ -2,8 +2,12 @@ name: Winterdienst-Check
 
 on:
   schedule:
-    # 2 Uhr und 19 Uhr UTC = 3 Uhr und 20 Uhr deutsche Winterzeit (CET)
-    - cron: "0 2,19 * * *"
+    # Cron läuft in UTC. Deutsche Winterzeit (CET) = UTC+1:
+    #   18:55 UTC = 19:55 Uhr -> Abend-Check für morgen
+    #   03:55 UTC = 04:55 Uhr -> Morgen-Check für heute (hier fällt die Entscheidung)
+    # Bewusst nicht zur vollen Stunde, weil dort bei GitHub viele Workflows starten.
+    - cron: "55 18 * * *"
+    - cron: "55 3 * * *"
   workflow_dispatch: {}  # erlaubt manuelles Starten über "Run workflow" zum Testen
 
 jobs:
