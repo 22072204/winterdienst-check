@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Winterdienst-Check für Niclas.
-Läuft 2x täglich über GitHub Actions: ca. 19:55 Uhr (Abend-Check für morgen)
+Läuft 2x täglich über GitHub Actions (angestoßen von cron-job.org): ca. 19:55 Uhr (Abend-Check für morgen)
 und ca. 4:55 Uhr (Morgen-Check für heute, hier fällt die Entscheidung), jeweils deutsche Winterzeit (CET, UTC+1).
 
 Prüft die 3 AGB-Kriterien für zwei Standorte (Rellingen, Ellerbek), je 10 km Umkreis:
@@ -451,8 +451,11 @@ def send_email(subject: str, body: str):
 
 def main():
     now_cet = datetime.now(CET)
-    # Bei "Run workflow" in GitHub ist das Event "workflow_dispatch" -> Mail wird als manuell markiert.
-    manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    # Startet cron-job.org den Lauf, schickt es quelle=cron mit -> dann ist es KEIN manueller Lauf.
+    manual = (
+        os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        and os.environ.get("QUELLE", "manuell") != "cron"
+    )
 
     try:
         run_check(determine_mode(now_cet), manual=manual)
