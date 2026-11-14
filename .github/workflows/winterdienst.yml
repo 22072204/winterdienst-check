@@ -1,14 +1,18 @@
 name: Winterdienst-Check
 
+# Der Start erfolgt NICHT mehr über den GitHub-Zeitplan (der war unpünktlich und hat Läufe ausfallen lassen),
+# sondern pünktlich über cron-job.org, das diesen Workflow per GitHub-API anstößt:
+#   19:55 Uhr -> Abend-Check für morgen
+#   04:55 Uhr -> Morgen-Check für heute (hier fällt die Entscheidung)
+# Manuell starten geht weiterhin über "Run workflow" (die Mail wird dann als "Manueller Lauf" markiert).
 on:
-  schedule:
-    # Cron läuft in UTC. Deutsche Winterzeit (CET) = UTC+1:
-    #   18:55 UTC = 19:55 Uhr -> Abend-Check für morgen
-    #   03:55 UTC = 04:55 Uhr -> Morgen-Check für heute (hier fällt die Entscheidung)
-    # Bewusst nicht zur vollen Stunde, weil dort bei GitHub viele Workflows starten.
-    - cron: "55 18 * * *"
-    - cron: "55 3 * * *"
-  workflow_dispatch: {}  # erlaubt manuelles Starten über "Run workflow" zum Testen
+  workflow_dispatch:
+    inputs:
+      quelle:
+        description: "Wer startet den Lauf? (cron = automatisch über cron-job.org, sonst manuell)"
+        required: false
+        default: "manuell"
+        type: string
 
 jobs:
   check:
@@ -22,4 +26,5 @@ jobs:
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          QUELLE: ${{ inputs.quelle }}
         run: python winterdienst_check.py
